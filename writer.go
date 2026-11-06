@@ -2449,9 +2449,16 @@ func (c *ColumnWriter) writeDataPage(page Page) (int64, error) {
 		}
 	}
 
+	// Bounds scans every value; compute it once for the page header
+	// statistics and the column index.
+	var bounds pageBounds
+	if c.writePageStats || c.writePageBounds {
+		bounds.min, bounds.max, bounds.ok = page.Bounds()
+	}
+
 	statistics := format.Statistics{}
 	if c.writePageStats {
-		statistics = c.makePageStatistics(page)
+		statistics = c.makePageStatistics(page, bounds)
 	}
 
 	c.header.page.UncompressedPageSize = int32(uncompressedPageSize)
@@ -2516,7 +2523,7 @@ func (c *ColumnWriter) writeDataPage(page Page) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		c.recordPageStats(plainHeaderLen, &c.header.page, page)
+		c.recordPageStats(plainHeaderLen, &c.header.page, page, bounds)
 		c.patchEncryptedCompressedSize(encSize, plainHeaderLen, c.header.page.CompressedPageSize)
 		return numValues, nil
 	}
@@ -2545,7 +2552,7 @@ func (c *ColumnWriter) writeDataPage(page Page) (int64, error) {
 		return 0, err
 	}
 
-	c.recordPageStats(plainHeaderLen, &c.header.page, page)
+	c.recordPageStats(plainHeaderLen, &c.header.page, page, bounds)
 	return numValues, nil
 }
 
@@ -2602,7 +2609,7 @@ func (c *ColumnWriter) writeDictionaryPage(output io.Writer, dict Dictionary) (e
 			return err
 		}
 		plainHeaderLen := int32(c.header.buffer.Len())
-		c.recordPageStats(plainHeaderLen, &c.header.dict, nil)
+		c.recordPageStats(plainHeaderLen, &c.header.dict, nil, pageBounds{})
 		c.patchEncryptedCompressedSize(int64(len(encHdr)+len(encBody)), plainHeaderLen, c.header.dict.CompressedPageSize)
 		return nil
 	}
@@ -2613,7 +2620,7 @@ func (c *ColumnWriter) writeDictionaryPage(output io.Writer, dict Dictionary) (e
 	if _, err := output.Write(buf.page); err != nil {
 		return err
 	}
-	c.recordPageStats(int32(c.header.buffer.Len()), &c.header.dict, nil)
+	c.recordPageStats(int32(c.header.buffer.Len()), &c.header.dict, nil, pageBounds{})
 	return nil
 }
 
@@ -2697,11 +2704,16 @@ func (c *ColumnWriter) fallbackDictionaryToPlain() error {
 	return nil
 }
 
-func (c *ColumnWriter) makePageStatistics(page Page) format.Statistics {
+// pageBounds holds the result of Page.Bounds for the data page being written.
+type pageBounds struct {
+	min, max Value
+	ok       bool
+}
+
+func (c *ColumnWriter) makePageStatistics(page Page, bounds pageBounds) format.Statistics {
 	numNulls := page.NumNulls()
-	minValue, maxValue, _ := page.Bounds()
-	minValueBytes := minValue.Bytes()
-	maxValueBytes := maxValue.Bytes()
+	minValueBytes := bounds.min.Bytes()
+	maxValueBytes := bounds.max.Bytes()
 	return format.Statistics{
 		Min:       minValueBytes, // deprecated
 		Max:       maxValueBytes, // deprecated
@@ -2711,7 +2723,7 @@ func (c *ColumnWriter) makePageStatistics(page Page) format.Statistics {
 	}
 }
 
-func (c *ColumnWriter) recordPageStats(headerSize int32, header *format.PageHeader, page Page) {
+func (c *ColumnWriter) recordPageStats(headerSize int32, header *format.PageHeader, page Page, bounds pageBounds) {
 	uncompressedSize := headerSize + header.UncompressedPageSize
 	compressedSize := headerSize + header.CompressedPageSize
 
@@ -2722,7 +2734,7 @@ func (c *ColumnWriter) recordPageStats(headerSize int32, header *format.PageHead
 		var minValue, maxValue Value
 		var pageHasBounds bool
 		if c.writePageBounds {
-			minValue, maxValue, pageHasBounds = page.Bounds()
+			minValue, maxValue, pageHasBounds = bounds.min, bounds.max, bounds.ok
 		}
 
 		c.columnIndex.IndexPage(numValues, numNulls, minValue, maxValue)
