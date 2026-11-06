@@ -68,8 +68,18 @@ func (d *byteArrayDictionary) insert(indexes []int32, rows sparse.Array) {
 
 	values := rows.StringArray()
 
+	// Sorted or clustered columns repeat a value across consecutive rows:
+	// reuse the previous index without a map lookup. lastValue keeps the
+	// caller's string (not the dictionary copy) so runs sharing a backing
+	// array compare by pointer.
+	lastValue, lastIndex := "", int32(-1)
+
 	for i := range indexes {
 		value := values.Index(i)
+		if lastIndex >= 0 && value == lastValue {
+			indexes[i] = lastIndex
+			continue
+		}
 
 		index, exists := d.table[value]
 		if !exists {
@@ -80,14 +90,14 @@ func (d *byteArrayDictionary) insert(indexes []int32, rows sparse.Array) {
 			if newLen > math.MaxUint32 {
 				panic("parquet: byte array dictionary size exceeds maximum (4GB); use DictionaryMaxBytes writer option to limit dictionary size")
 			}
-			value = d.alloc.copyString(value)
 			index = int32(len(d.table))
-			d.table[value] = index
+			d.table[d.alloc.copyString(value)] = index
 			d.values.Append([]byte(value)...)
 			d.offsets.AppendValue(uint32(d.values.Len()))
 		}
 
 		indexes[i] = index
+		lastValue, lastIndex = value, index
 	}
 }
 
@@ -112,7 +122,11 @@ func (d *byteArrayDictionary) Bounds(indexes []int32) (min, max Value) {
 			j := i + n
 			d.lookupString(indexes[i:j:j], makeArrayFromSlice(values[:n:n]))
 
-			for _, value := range values[:n:n] {
+			for k, value := range values[:n:n] {
+				// A repeated index cannot move the bounds.
+				if indexes[i+k] == indexes[i+k-1] {
+					continue
+				}
 				switch {
 				case value < minValue:
 					minValue = value
